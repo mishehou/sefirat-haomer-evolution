@@ -122,24 +122,23 @@ async function waitForEvolution(maxWaitMs = 300000) {
     const start = Date.now();
     while (Date.now() - start < maxWaitMs) {
         try {
-            // Check if instance exists
             const r = await axios.get(
                 `${EVOLUTION_URL}/instance/fetchInstances`,
                 { headers: evoHeaders, timeout: 8000 }
             );
             const instances = Array.isArray(r.data) ? r.data : [];
-            const inst = instances.find(i => i.instance?.instanceName === EVOLUTION_INSTANCE);
+            // v2 API: each entry has { name, connectionStatus, ... }
+            const inst = instances.find(i => i.name === EVOLUTION_INSTANCE);
 
             if (inst) {
-                const state = inst.instance?.state;
-                if (state === 'open') {
+                const status = inst.connectionStatus;
+                if (status === 'open') {
                     console.log('Evolution API instance is connected.');
                     await registerWebhook();
                     return true;
                 }
-                console.log(`Evolution instance state: ${state} — waiting…`);
+                console.log(`Evolution instance status: ${status} — scan QR at http://<NAS-IP>:5052/setup`);
             } else {
-                // Instance doesn't exist yet — create it
                 console.log('Creating Evolution API instance…');
                 await axios.post(
                     `${EVOLUTION_URL}/instance/create`,
@@ -201,9 +200,9 @@ function startWebServer() {
             const r = await axios.get(`${EVOLUTION_URL}/instance/fetchInstances`,
                 { headers: evoHeaders, timeout: 8000 });
             const instances = Array.isArray(r.data) ? r.data : [];
-            const inst = instances.find(i => i.instance?.instanceName === EVOLUTION_INSTANCE);
+            const inst = instances.find(i => i.name === EVOLUTION_INSTANCE);
             if (inst) {
-                state = inst.instance.state === 'open' ? 'open' : 'qr';
+                state = inst.connectionStatus === 'open' ? 'open' : 'qr';
                 if (state === 'qr') {
                     try {
                         const qrRes = await axios.get(
