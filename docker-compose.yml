@@ -1,0 +1,54 @@
+version: '3'
+
+networks:
+  omer-evo-net:
+    driver: bridge
+
+services:
+
+  # ── Evolution API ────────────────────────────────────────────────────────────
+  # Completely separate from the existing WAHA container.
+  # Admin dashboard: http://<NAS-IP>:8084
+  omer-evolution-api:
+    image: atendai/evolution-api:latest
+    container_name: omer-evolution-api
+    restart: unless-stopped
+    ports:
+      - "8084:8080"
+    environment:
+      - SERVER_URL=http://omer-evolution-api:8080
+      - AUTHENTICATION_TYPE=apikey
+      - AUTHENTICATION_API_KEY=omer-evo-secret-key
+      - AUTHENTICATION_EXPOSE_IN_FETCH_INSTANCES=true
+      - CONFIG_SESSION_PHONE_CLIENT=Sefirat HaOmer Bot
+      - CONFIG_SESSION_PHONE_NAME=Chrome
+      - QRCODE_LIMIT=30
+      - WEBHOOK_GLOBAL_ENABLED=false
+      - DEL_INSTANCE=false
+    volumes:
+      - /volume2/docker/sefirat-evolution/evolution-data:/evolution/instances
+    networks:
+      - omer-evo-net
+
+  # ── Sefirat HaOmer bot (Evolution edition) ───────────────────────────────────
+  # Port 5052 — does NOT conflict with existing bot on 5051.
+  sefirat-evo-bot:
+    image: sefirat-evo-bot:latest
+    container_name: sefirat-evo-bot
+    restart: unless-stopped
+    ports:
+      - "5052:3500"
+    environment:
+      - TIME_TO_SEND=20:30
+      - TIMEZONE=Europe/Berlin
+      - EVOLUTION_URL=http://omer-evolution-api:8080
+      - EVOLUTION_API_KEY=omer-evo-secret-key
+      - EVOLUTION_INSTANCE=sefirat-omer
+      - CONTACTS_FILE=/data/contacts.json
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /volume2/docker/birthday-bot/data:/data
+    networks:
+      - omer-evo-net
+    depends_on:
+      - omer-evolution-api
