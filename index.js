@@ -8,6 +8,9 @@ const path    = require('path');
 const { spawn } = require('child_process');
 const { getOmerMessage } = require('./omerLogic');
 
+// Latest QR code pushed by Evolution API webhook — served on /setup page
+let latestQrBase64 = null;
+
 const TIME_TO_SEND      = process.env.TIME_TO_SEND      || '20:30';
 const TIMEZONE          = process.env.TIMEZONE          || 'Europe/Berlin';
 const EVOLUTION_URL     = process.env.EVOLUTION_URL     || 'http://omer-evolution-api:8080';
@@ -76,42 +79,67 @@ function chatIdToNumber(chatId) {
 }
 
 async function sendMessage(chatId, label, text) {
-    try {
-        await axios.post(
-            `${EVOLUTION_URL}/message/sendText/${EVOLUTION_INSTANCE}`,
-            { number: chatIdToNumber(chatId), text },
-            { headers: evoHeaders, timeout: 15000 }
-        );
-        console.log(`Sent text to "${label}" (${chatId})`);
-        return true;
-    } catch (err) {
-        const detail = err.response ? JSON.stringify(err.response.data) : err.message;
-        console.error(`Failed to send text to "${label}": ${detail}`);
-        return false;
+    // v1.8.x wraps content in textMessage; v2.x uses flat text field
+    const v1Body = { number: chatIdToNumber(chatId), textMessage: { text } };
+    const v2Body = { number: chatIdToNumber(chatId), text };
+    for (const body of [v1Body, v2Body]) {
+        try {
+            await axios.post(
+                `${EVOLUTION_URL}/message/sendText/${EVOLUTION_INSTANCE}`,
+                body,
+                { headers: evoHeaders, timeout: 15000 }
+            );
+            console.log(`Sent text to "${label}" (${chatId})`);
+            return true;
+        } catch (err) {
+            const detail = err.response ? JSON.stringify(err.response.data) : err.message;
+            if (err.response?.status === 400 && detail.includes('textMessage')) continue;
+            console.error(`Failed to send text to "${label}": ${detail}`);
+            return false;
+        }
     }
+    console.error(`Failed to send text to "${label}": all formats failed`);
+    return false;
 }
 
 async function sendImage(chatId, label, base64Data, caption = '') {
-    try {
-        await axios.post(
-            `${EVOLUTION_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`,
-            {
-                number: chatIdToNumber(chatId),
-                mediatype: 'image',
-                mimetype: 'image/png',
-                fileName: 'omer.png',
-                media: base64Data,
-                caption,
-            },
-            { headers: evoHeaders, timeout: 30000 }
-        );
-        console.log(`Sent image to "${label}" (${chatId})`);
-        return true;
-    } catch (err) {
-        const detail = err.response ? JSON.stringify(err.response.data) : err.message;
-        console.error(`Failed to send image to "${label}": ${detail}`);
-        return false;
+    // v1.8.x wraps content in mediaMessage; v2.x uses flat fields
+    const v1Body = {
+        number: chatIdToNumber(chatId),
+        mediaMessage: {
+            mediatype: 'image',
+            mimetype: 'image/png',
+            fileName: 'omer.png',
+            media: base64Data,
+            caption,
+        },
+    };
+    const v2Body = {
+        number: chatIdToNumber(chatId),
+        mediatype: 'image',
+        mimetype: 'image/png',
+        fileName: 'omer.png',
+        media: base64Data,
+        caption,
+    };
+    for (const body of [v1Body, v2Body]) {
+        try {
+            await axios.post(
+                `${EVOLUTION_URL}/message/sendMedia/${EVOLUTION_INSTANCE}`,
+                body,
+                { headers: evoHeaders, timeout: 30000 }
+            );
+            console.log(`Sent image to "${label}" (${chatId})`);
+            return true;
+        } catch (err) {
+            const detail = err.response ? JSON.stringify(err.response.data) : err.message;
+            if (err.response?.status === 400 && detail.includes('mediaMessage')) continue;
+            console.error(`Failed to send image to "${label}": ${detail}`);
+            return false;
+        }
     }
+    console.error(`Failed to send image to "${label}": all formats failed`);
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,11 +155,13 @@ async function waitForEvolution(maxWaitMs = 300000) {
                 { headers: evoHeaders, timeout: 8000 }
             );
             const instances = Array.isArray(r.data) ? r.data : [];
-            // v2 API: each entry has { name, connectionStatus, ... }
-            const inst = instances.find(i => i.name === EVOLUTION_INSTANCE);
+            // v2 API: { name, connectionStatus }  /  v1.8.x API: { instance: { instanceName, state } }
+            const inst = instances.find(i =>
+                i.name === EVOLUTION_INSTANCE || i.instance?.instanceName === EVOLUTION_INSTANCE
+            );
 
             if (inst) {
-                const status = inst.connectionStatus;
+                const status = inst.connectionStatus || inst.instance?.state || inst.instance?.status;
                 if (status === 'open') {
                     console.log('Evolution API instance is connected.');
                     await registerWebhook();
@@ -145,14 +175,14 @@ async function waitForEvolution(maxWaitMs = 300000) {
                     {
                         instanceName: EVOLUTION_INSTANCE,
                         integration: 'WHATSAPP-BAILEYS',
-                        webhook: {
-                            url: 'http://sefirat-evo-bot:3500/webhook',
-                            byEvents: true,
-                            events: ['MESSAGES_UPSERT'],
-                        },
+                        webhook: 'http://sefirat-evo-bot:3500/webhook',
+                        webhook_by_events: true,
+                        events: ['MESSAGES_UPSERT', 'QRCODE_UPDATED'],
                     },
                     { headers: evoHeaders, timeout: 10000 }
                 ).catch(e => console.log('Instance create:', e.response?.data?.message || e.message));
+                // Register webhook immediately so QR events are received from the start
+                await registerWebhook();
             }
         } catch (err) {
             console.log(`Evolution API not reachable yet: ${err.message}`);
@@ -164,22 +194,33 @@ async function waitForEvolution(maxWaitMs = 300000) {
 }
 
 async function registerWebhook() {
-    try {
-        await axios.post(
-            `${EVOLUTION_URL}/webhook/set/${EVOLUTION_INSTANCE}`,
-            {
-                webhook: {
-                    enabled: true,
-                    url: 'http://sefirat-evo-bot:3500/webhook',
-                    byEvents: true,
-                    events: ['MESSAGES_UPSERT'],
-                },
-            },
-            { headers: evoHeaders, timeout: 8000 }
-        );
-        console.log('Webhook registered.');
-    } catch (e) {
-        console.log('Webhook registration warning:', e.response?.data?.message || e.message);
+    // v1.8.x format: flat body; v2.x format: nested under 'webhook'
+    const v1Body = {
+        url: 'http://sefirat-evo-bot:3500/webhook',
+        webhook_by_events: true,
+        events: ['MESSAGES_UPSERT', 'QRCODE_UPDATED'],
+    };
+    const v2Body = {
+        webhook: {
+            enabled: true,
+            url: 'http://sefirat-evo-bot:3500/webhook',
+            byEvents: true,
+            events: ['MESSAGES_UPSERT', 'QRCODE_UPDATED'],
+        },
+    };
+    for (const body of [v1Body, v2Body]) {
+        try {
+            await axios.post(
+                `${EVOLUTION_URL}/webhook/set/${EVOLUTION_INSTANCE}`,
+                body,
+                { headers: evoHeaders, timeout: 8000 }
+            );
+            console.log('Webhook registered.');
+            return;
+        } catch (e) {
+            const msg = e.response?.data?.message || e.response?.data?.[0] || e.message;
+            console.log('Webhook registration attempt failed:', msg);
+        }
     }
 }
 
@@ -200,20 +241,26 @@ function startWebServer() {
             const r = await axios.get(`${EVOLUTION_URL}/instance/fetchInstances`,
                 { headers: evoHeaders, timeout: 8000 });
             const instances = Array.isArray(r.data) ? r.data : [];
-            const inst = instances.find(i => i.name === EVOLUTION_INSTANCE);
+            const inst = instances.find(i =>
+                i.name === EVOLUTION_INSTANCE || i.instance?.instanceName === EVOLUTION_INSTANCE
+            );
             if (inst) {
-                state = inst.connectionStatus === 'open' ? 'open' : 'qr';
+                const connStatus = inst.connectionStatus || inst.instance?.state || inst.instance?.status;
+                state = connStatus === 'open' ? 'open' : 'qr';
                 if (state === 'qr') {
-                    try {
-                        const qrRes = await axios.get(
-                            `${EVOLUTION_URL}/instance/connect/${EVOLUTION_INSTANCE}`,
-                            { headers: evoHeaders, timeout: 8000 });
-                        const base64 = qrRes.data?.base64;
-                        if (base64) {
-                            qrHtml = `<img src="${base64}" style="max-width:280px;border:1px solid #ccc;border-radius:8px;">`;
-                        }
-                    } catch (e) {
-                        qrHtml = '<p>Could not load QR. Try refreshing.</p>';
+                    // Prefer QR received via webhook; fall back to REST endpoint
+                    const base64 = latestQrBase64 || await (async () => {
+                        try {
+                            const qrRes = await axios.get(
+                                `${EVOLUTION_URL}/instance/connect/${EVOLUTION_INSTANCE}`,
+                                { headers: evoHeaders, timeout: 8000 });
+                            return qrRes.data?.base64 || null;
+                        } catch (_) { return null; }
+                    })();
+                    if (base64) {
+                        qrHtml = `<img src="${base64}" style="max-width:280px;border:1px solid #ccc;border-radius:8px;">`;
+                    } else {
+                        qrHtml = '<p>QR not yet available. Auto-refreshing…</p>';
                     }
                 }
             }
@@ -271,7 +318,15 @@ function startWebServer() {
         res.sendStatus(200);
         try {
             const event = req.body;
-            // Evolution API wraps events: { event: 'messages.upsert', data: { ... } }
+            // Evolution API wraps events: { event: 'qrcode.updated' | 'messages.upsert', data: { ... } }
+            if (event?.event === 'qrcode.updated') {
+                const base64 = event.data?.qrcode?.base64;
+                if (base64) {
+                    latestQrBase64 = base64;
+                    console.log('QR code updated via webhook.');
+                }
+                return;
+            }
             if (event?.event !== 'messages.upsert') return;
             const data = event.data;
             const text = (

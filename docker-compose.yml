@@ -6,24 +6,10 @@ networks:
 
 services:
 
-  # ── PostgreSQL — required by Evolution API v2 ────────────────────────────────
-  omer-evo-postgres:
-    image: postgres:15-alpine
-    container_name: omer-evo-postgres
-    restart: unless-stopped
-    environment:
-      - POSTGRES_DB=evolution
-      - POSTGRES_USER=evolution
-      - POSTGRES_PASSWORD=evo-pg-pass
-    volumes:
-      - /volume2/docker/sefirat-evolution/postgres-data:/var/lib/postgresql/data
-    networks:
-      - omer-evo-net
-
-  # ── Evolution API ────────────────────────────────────────────────────────────
+  # ── Evolution API v1.8.x — file-based storage (no PostgreSQL needed) ─────────
   # Admin dashboard: http://<NAS-IP>:8084
   omer-evolution-api:
-    image: atendai/evolution-api:latest
+    image: atendai/evolution-api:v1.8.7
     container_name: omer-evolution-api
     restart: unless-stopped
     ports:
@@ -38,21 +24,15 @@ services:
       - QRCODE_LIMIT=30
       - WEBHOOK_GLOBAL_ENABLED=false
       - DEL_INSTANCE=false
-      - DATABASE_ENABLED=true
-      - DATABASE_PROVIDER=postgresql
-      - DATABASE_CONNECTION_URI=postgresql://evolution:evo-pg-pass@omer-evo-postgres:5432/evolution
-      - DATABASE_CONNECTION_CLIENT_NAME=evolution_exchange
-      - DATABASE_SAVE_DATA_INSTANCE=true
-      - DATABASE_SAVE_DATA_NEW_MESSAGE=false
-      - DATABASE_SAVE_MESSAGE_UPDATE=false
-      - DATABASE_SAVE_DATA_CONTACTS=false
-      - DATABASE_SAVE_DATA_CHATS=false
+      - STORE_CLEANING_INTERVAL=7200
+      - STORE_MESSAGES=false
+      - STORE_MESSAGE_UP=false
+      - STORE_CONTACTS=false
+      - STORE_CHATS=false
     volumes:
       - /volume2/docker/sefirat-evolution/evolution-data:/evolution/instances
     networks:
       - omer-evo-net
-    depends_on:
-      - omer-evo-postgres
 
   # ── Sefirat HaOmer bot (Evolution edition) ───────────────────────────────────
   # Port 5052 — does NOT conflict with existing bot on 5051.
